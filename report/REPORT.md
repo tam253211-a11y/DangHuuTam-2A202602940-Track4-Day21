@@ -1,4 +1,4 @@
-# Báo cáo Day 6: [ĐIỀN tên đề tài ngắn]
+# Báo cáo Day 6: Auto-label 2D box từ box 3D và điểm LiDAR
 
 > Thay **mọi** ô có chữ ĐIỀN nằm trong ngoặc vuông bằng nội dung của bạn, xoá luôn cả dấu ngoặc vuông. Lệnh `python tools/check_submission.py` sẽ báo FAIL nếu còn sót bất kỳ chỗ nào.
 
@@ -6,17 +6,15 @@
 - **MSSV:** 2A202602940
 - **Lớp:** [ĐIỀN]
 - **Link repo:** https://github.com/tam253211-a11y/DangHuuTam-2A202602940-Track4-Day21
-- **Topic:** [ĐIỀN một chữ cái A/B/C/D/E/F] — [ĐIỀN tên topic]
-- **Dataset:** [ĐIỀN một hoặc nhiều trong: data/synthetic, data/kitti_mini, data/nuscenes_mini_subset, log riêng]
-- **Các frame đã dùng:** [ĐIỀN danh sách frame id, ví dụ 000011, 000049 hoặc scene-0103_010]
+- **Topic:** F — Auto-label support
+- **Dataset:** data/kitti_mini (chính), data/nuscenes_mini_subset (so sánh), data/synthetic (test)
+- **Các frame đã dùng:** toàn bộ 20 frame kitti_mini; toàn bộ 80 keyframe nuScenes
 
 > Hãy viết ngắn: mỗi mục từ 3 đến 8 dòng, ưu tiên số liệu và hình ảnh.
 
 ## 1. Claim
 
-Một câu khẳng định kỹ thuật có thể kiểm chứng. Ví dụ: *"Lệch yaw 1° làm 12% điểm LiDAR rơi ra khỏi vật thể ở 30 m, phát hiện được bằng edge-alignment score với ngưỡng X."*
-
-[ĐIỀN]
+Claim nháp: 2D box tạo từ min/max điểm LiDAR nằm trong box 3D khớp label 2D tốt hơn (IoU cao hơn) so với chiếu 8 góc box 3D; và lệch yaw 1° làm IoU trung bình giảm hơn 0.2, đủ để gắn cờ "label cần review" với ngưỡng IoU < 0.7.
 
 ## 2. Evidence
 
