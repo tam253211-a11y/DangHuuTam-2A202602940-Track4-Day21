@@ -2,7 +2,7 @@
 
 - **Họ tên:** Đặng Hữu Tâm
 - **MSSV:** 2A202602940
-- **Lớp:** [ĐIỀN]
+- **Lớp:** AI20K-T4
 - **Link repo:** https://github.com/tam253211-a11y/DangHuuTam-2A202602940-Track4-Day21
 - **Topic:** F — Auto-label support
 - **Dataset:** data/kitti_mini (thí nghiệm chính), data/nuscenes_mini_subset (so sánh, bonus B5), data/synthetic (test CP2)
