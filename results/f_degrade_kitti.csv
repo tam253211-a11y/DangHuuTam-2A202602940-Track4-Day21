@@ -1,0 +1,8 @@
+degrade,level,n_obj,iou_corners_mean,iou_points_mean,n_pts_img_median,points_fail_pct
+none,0.0,115,0.933,0.562,107.0,6.087
+dropout_keep,0.7,115,0.933,0.546,74.0,6.087
+dropout_keep,0.5,115,0.933,0.528,48.0,6.087
+dropout_keep,0.3,115,0.933,0.487,28.0,11.304
+noise_sigma_m,0.02,115,0.933,0.586,107.0,4.348
+noise_sigma_m,0.05,115,0.933,0.609,104.0,3.478
+noise_sigma_m,0.1,115,0.933,0.618,95.0,3.478

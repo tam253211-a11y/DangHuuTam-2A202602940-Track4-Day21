@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from starter.datasets import list_frames, load_frame
+from starter.perturb import gaussian_noise, random_dropout
 from starter.kitti_io import KittiCalib, KittiObject
 from starter.projection import (box3d_corners_cam, cam_to_image, draw_box2d, overlay_points,
                                 perturb_extrinsic, velo_to_cam)
@@ -119,6 +120,9 @@ def evaluate_frame(fr: dict, calib_pert: KittiCalib | None = None, ground_margin
             gt_h_px=round(float(gt[3] - gt[1]), 1),
             n_pts_3d=int(inside.sum()), n_pts_img=n_proj,
             iou_corners=round(iou(b_corner, gt), 4),
+            # độ lệch tâm (px) box corners so với GT: dùng cho cách phát hiện drift thứ 2 (bonus B1)
+            du_corners=round(float((b_corner[0] + b_corner[2] - gt[0] - gt[2]) / 2), 2) if b_corner is not None else np.nan,
+            dv_corners=round(float((b_corner[1] + b_corner[3] - gt[1] - gt[3]) / 2), 2) if b_corner is not None else np.nan,
             iou_points=round(iou(b_points, gt), 4),
             points_box_ok=b_points is not None,
         ))
@@ -188,6 +192,10 @@ def cmd_sweep(args) -> None:
     summ = []
     for (kind, level), g in df_g.groupby(["perturb", "level"], sort=False):
         frame_med = g.groupby("frame").iou_corners.median()
+        # Cách 2: độ lệch tâm có dấu, lấy trung vị theo frame. Nhiễu label lệch ngẫu nhiên quanh 0 nên triệt tiêu,
+        # còn drift làm mọi box lệch cùng một hướng -> tín hiệu không phụ thuộc kích thước box.
+        fm = g.groupby("frame")[["du_corners", "dv_corners"]].median()
+        frame_off = np.hypot(fm.du_corners, fm.dv_corners)
         summ.append(dict(perturb=kind, level=level, n_obj=len(g),
                          iou_corners_mean=round(g.iou_corners.mean(), 3),
                          iou_points_mean=round(g.iou_points.mean(), 3),
@@ -195,7 +203,9 @@ def cmd_sweep(args) -> None:
                          iou_corners_far_mean=round(g[g.depth_m >= 20].iou_corners.mean(), 3),
                          obj_flag_pct=round(100 * (g.iou_corners < thr).mean(), 1),
                          obj_flag_pct_points=round(100 * (g.iou_points < thr).mean(), 1),
-                         frame_flag_pct=round(100 * (frame_med < thr).mean(), 1)))
+                         frame_flag_pct=round(100 * (frame_med < thr).mean(), 1),
+                         frame_offset_px_median=round(float(frame_off.median()), 1),
+                         frame_flag_pct_offset=round(100 * (frame_off > args.flag_offset_px).mean(), 1)))
     summ = pd.DataFrame(summ)
     out = RESULTS / f"f_perturb_sweep_{args.tag}.csv"
     summ.to_csv(out, index=False)
@@ -219,10 +229,24 @@ def cmd_sweep(args) -> None:
     FIGS.mkdir(parents=True, exist_ok=True)
     fig.savefig(FIGS / f"f_perturb_sweep_{args.tag}.png", dpi=120)
 
+    # B1: so sánh 2 cách phát hiện drift theo % frame bị gắn cờ
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
+    for ax, kind, unit in zip(axes, ["yaw", "pitch", "tx"], ["độ", "độ", "cm"]):
+        s_ = pd.concat([summ[summ.perturb == "none"], summ[summ.perturb == kind]])
+        ax.plot(s_.level, s_.frame_flag_pct, "o-", label=f"trung vị IoU < {thr}")
+        ax.plot(s_.level, s_.frame_flag_pct_offset, "s-", label=f"lệch tâm > {args.flag_offset_px} px")
+        ax.set(title=f"Drift {kind}", xlabel=f"mức lệch ({unit})", ylabel="% frame bị gắn cờ", ylim=(-3, 103))
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=9)
+    fig.suptitle(f"Hai cách phát hiện calibration drift ({args.data_root}); mức 0 = tỉ lệ báo nhầm")
+    fig.tight_layout()
+    fig.savefig(FIGS / f"f_drift_detector_compare_{args.tag}.png", dpi=120)
+
 
 # ----------------------------------------------------------------------------- hình minh hoạ
-def render(fr: dict, calib_pert: KittiCalib | None, out: Path, only_obj: int | None = None,
-           ground_margin: float = 0.1, min_points: int = 5, crop: bool = False) -> None:
+def render(fr: dict, calib_pert: KittiCalib | None, out: Path | None, only_obj: int | None = None,
+           ground_margin: float = 0.1, min_points: int = 5, crop: bool = False) -> np.ndarray:
+    """Vẽ overlay; out=None thì chỉ trả ảnh về (dùng cho --compare)."""
     calib = fr["calib"]
     calib_pert = calib_pert or calib
     pts = fr["points"][:, :3]
@@ -254,18 +278,80 @@ def render(fr: dict, calib_pert: KittiCalib | None, out: Path, only_obj: int | N
         pad = 60
         vis = vis[max(0, int(y1) - pad):min(H, int(y2) + pad), max(0, int(x1) - pad):min(W, int(x2) + pad)]
         vis = cv2.resize(vis, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out), vis)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out), vis)
+    return vis
+
+
+def _caption(img: np.ndarray, text: str, color) -> np.ndarray:
+    """Thêm dải chữ phía trên ảnh (cv2.putText không có dấu tiếng Việt)."""
+    bar = np.zeros((34, img.shape[1], 3), np.uint8)
+    cv2.putText(bar, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    return np.vstack([bar, img])
 
 
 def cmd_show(args) -> None:
     fr = _load(args.data_root, args.frame)
     cp = perturb_extrinsic(fr["calib"], args.roll_deg, args.pitch_deg, args.yaw_deg, (args.tx, args.ty, args.tz))
-    render(fr, cp, Path(args.out), args.obj, args.ground_margin, args.min_points, args.crop)
+    if args.compare:
+        # Trên: calib đúng. Dưới: calib lệch. Mỗi ảnh ghi trung vị IoU corners của frame và có bị flag không.
+        panels = []
+        for name, c in [("calib dung", None), (args.label or "calib lech", cp)]:
+            med = float(np.median([r["iou_corners"] for r in evaluate_frame(fr, c, args.ground_margin, args.min_points)]))
+            flag = med < args.flag_iou
+            text = f"{name}: median IoU corners = {med:.2f} -> {'FLAG' if flag else 'KHONG flag'} (nguong {args.flag_iou})"
+            img = render(fr, c, None, args.obj, args.ground_margin, args.min_points, args.crop)
+            panels.append(_caption(img, text, (0, 0, 255) if flag else (0, 255, 255)))
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(args.out, np.vstack(panels))
+    else:
+        render(fr, cp, Path(args.out), args.obj, args.ground_margin, args.min_points, args.crop)
     for r in evaluate_frame(fr, cp, args.ground_margin, args.min_points):
         if args.obj is None or r["obj"] == args.obj:
             print(r)
     print(f"-> {args.out}")
+
+
+# ----------------------------------------------------------------------------- B2: suy giảm dữ liệu
+DEGRADES = [("none", 0, lambda p, s: p)] +     [("dropout_keep", k, lambda p, s, k=k: random_dropout(p, keep_ratio=k, seed=s)) for k in (0.7, 0.5, 0.3)] +     [("noise_sigma_m", v, lambda p, s, v=v: gaussian_noise(p, sigma_xyz_m=v, seed=s)) for v in (0.02, 0.05, 0.1)]
+
+
+def cmd_degrade(args) -> None:
+    frames = args.frames or list_frames(args.data_root)
+    cache = {f: _load(args.data_root, f) for f in frames}
+    rows = []
+    for kind, level, fn in DEGRADES:
+        for f, fr in cache.items():
+            fr_d = dict(fr, points=fn(fr["points"], args.seed))   # không sửa dữ liệu gốc
+            for r in evaluate_frame(fr_d, None, args.ground_margin, args.min_points):
+                rows.append(dict(degrade=kind, level=level, **r))
+    df = pd.DataFrame(rows)
+    summ = (df.groupby(["degrade", "level"], sort=False)
+              .agg(n_obj=("obj", "size"), iou_corners_mean=("iou_corners", "mean"),
+                   iou_points_mean=("iou_points", "mean"), n_pts_img_median=("n_pts_img", "median"),
+                   points_fail_pct=("points_box_ok", lambda x: 100 * (~x).mean()))
+              .round(3).reset_index())
+    out = RESULTS / f"f_degrade_{args.tag}.csv"
+    summ.to_csv(out, index=False)
+    print(summ.to_string(index=False))
+    print(f"-> {out}")
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+    for ax, kind, xl in zip(axes, ["dropout_keep", "noise_sigma_m"], ["tỉ lệ điểm giữ lại", "sigma nhiễu (m)"]):
+        base = summ[summ.degrade == "none"].assign(level=1.0 if kind == "dropout_keep" else 0.0)
+        s_ = pd.concat([base, summ[summ.degrade == kind]])
+        ax.plot(s_.level, s_.iou_points_mean, "o-", label="IoU points")
+        ax.plot(s_.level, s_.iou_corners_mean, "s--", label="IoU corners (không dùng điểm)")
+        ax.plot(s_.level, s_.points_fail_pct / 100, "^:", label="tỉ lệ points không tạo được box")
+        ax.set(title=kind, xlabel=xl, ylabel="IoU / tỉ lệ", ylim=(0, 1))
+        if kind == "dropout_keep":
+            ax.invert_xaxis()
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=8, loc="upper left", bbox_to_anchor=(0, 0.88))   # đặt giữa đường corners và points
+    fig.suptitle(f"Stress test suy giảm LiDAR với auto-label ({args.data_root}, seed={args.seed})")
+    fig.tight_layout()
+    fig.savefig(FIGS / f"f_degrade_{args.tag}.png", dpi=120)
 
 
 # ----------------------------------------------------------------------------- latency
@@ -308,6 +394,8 @@ def main() -> None:
     p = sub.add_parser("sweep", help="IoU theo mức calibration drift (yaw / pitch / dịch ngang)")
     common(p)
     p.add_argument("--flag-iou", type=float, default=0.7, help="IoU dưới ngưỡng này -> gắn cờ 'label cần review'")
+    p.add_argument("--flag-offset-px", type=float, default=4.0,
+                   help="trung vị độ lệch tâm của frame lớn hơn ngưỡng này (px) -> gắn cờ drift")
     p.set_defaults(func=cmd_sweep)
 
     p = sub.add_parser("show", help="vẽ một frame (có thể perturb), tuỳ chọn chỉ 1 object")
@@ -316,16 +404,24 @@ def main() -> None:
     p.add_argument("--obj", type=int, help="chỉ số object trong label")
     p.add_argument("--crop", action="store_true", help="cắt và phóng to quanh object")
     p.add_argument("--out", required=True)
+    p.add_argument("--compare", action="store_true", help="ghép ảnh calib đúng (trên) và calib lệch (dưới)")
+    p.add_argument("--label", help="chú thích cho ảnh calib lệch, ví dụ 'yaw 1 deg'")
+    p.add_argument("--flag-iou", type=float, default=0.7, help="ngưỡng gắn cờ ghi trên ảnh --compare")
     for k in ("roll-deg", "pitch-deg", "yaw-deg", "tx", "ty", "tz"):
         p.add_argument(f"--{k}", type=float, default=0.0)
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("degrade", help="stress test: random dropout và nhiễu Gaussian, 3 mức mỗi loại (B2)")
+    common(p)
+    p.add_argument("--seed", type=int, default=0, help="seed cho phép ngẫu nhiên (chạy lại ra cùng số)")
+    p.set_defaults(func=cmd_degrade)
 
     p = sub.add_parser("latency", help="đo p50/p95 thời gian xử lý mỗi frame")
     common(p)
     p.add_argument("--repeats", type=int, default=20)
     p.set_defaults(func=cmd_latency)
 
-    args = ap.parse_args()
+    args = ap.parse_args(sys.argv[1:] or ["eval"])   # chạy không tham số = eval trên kitti_mini
     args.func(args)
 
 
